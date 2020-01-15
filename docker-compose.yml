@@ -1,0 +1,63 @@
+version: '3'
+services:
+  traefik:
+    image: traefik:v2.0.2
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.swarmMode=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-public"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - traefik-public
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.frontend.rule=Host:traefik.${SERVER_NAME}"
+        - "traefik.docker.network=traefik-public"
+        - "traefik.backend=traefik"
+        - "traefik.enable=true"
+        - "traefik.port=8080"
+  nginx:
+    image: maulidihsan/nginx
+    networks:
+      - traefik-public
+    stdin_open: true
+    tty: true
+    volumes:
+      - "./:/opt/app"
+    environment:
+      - SERVER_NAME=${SERVER_NAME}
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.domain=site.ku"
+        - "traefik.http.routers.nginx.rule=Host(`${SERVER_NAME}`)"
+        - "traefik.http.routers.nginx.entrypoints=web"
+        - "traefik.http.services.nginx.loadbalancer.server.port=80"
+  php-fpm:
+    image: maulidihsan/php-fpm
+    networks:
+      - traefik-public
+    volumes:
+      - "./:/opt/app"
+    stdin_open: true
+    tty: true
+  redis:
+    image: maulidihsan/redis
+    networks:
+      - traefik-public
+
+networks:
+  traefik-public:
+    external: true
+

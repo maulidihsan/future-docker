@@ -1,0 +1,51 @@
+user nginx;
+daemon off;
+worker_processes auto;
+
+error_log /dev/stdout info;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include         /etc/nginx/mime.types;
+    default_type    application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log      /dev/stdout;
+
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+
+    server {
+        listen       80;
+        server_name  ${SERVER_NAME};
+
+        # note that these lines are originally from the "location /" block
+        root   /opt/app/public;
+        index index.php index.html index.htm;
+
+        error_page 404 /404.html;
+        error_page 500 502 503 504 /50x.html;
+
+        location = /50x.html {
+            root /usr/share/nginx/html;
+        }
+
+        location ~ \.php$ {
+            resolver 127.0.0.11 ipv6=off;
+            set $phpFPMHost "php-fpm:9000";
+            try_files $uri =404;
+            fastcgi_pass $phpFPMHost;
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            include fastcgi_params;
+        }
+    }
+    include /etc/nginx/conf.d/*.conf;
+}
