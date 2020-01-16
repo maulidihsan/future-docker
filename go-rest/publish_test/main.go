@@ -1,7 +1,9 @@
 package main
 
 import (
-    "fmt"
+	"fmt"
+	"flag"
+	"strings"
 	"os"
 	"os/exec"
 	"math/rand"
@@ -13,12 +15,20 @@ import (
 	"github.com/streadway/amqp"
 )
 
+
 func main() {
-    ReceiveMessage()
+	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
+	stackNamePtr := flag.String("stack-name", "shared", "docker stack name")
+	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
+	dbhostPtr := flag.String("db", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
+	dirPathPtr := flag.String("dir", "./", "wordpress root path")
+	confPathPtr := flag.String("conf-dir", "./", "nginx conf path")
+	flag.Parse()
+    ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dbauthPtr, *dbhostPtr, *dirPathPtr, *confPathPtr)
 }
 
-func ReceiveMessage() {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672")
+func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPath string, confPath string) {
+	conn, err := amqp.Dial("amqp://"+r)
 	if err != nil {
         panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
@@ -77,9 +87,10 @@ func ReceiveMessage() {
 			website := Website{}
 			json.Unmarshal([]byte(msg), &website)
 			website.Password = String(8)
-			CreateDB(website)
-			SetupScript(website)
-			SendMessage(conn, "shared_nginx")
+			CreateDB(website, dbAuth, dbHost)
+			AddUser(website, dbAuth, dbHost)
+			SetupScript(website, dbHost, dirPath, confPath)
+			SendMessage(conn, stack+"_nginx")
 			m.Ack(false)
 		}
 	}()
@@ -100,8 +111,9 @@ func String(length int) string {
 	return StringWithCharset(length, charset)
 }
 
-func CreateDB(web Website) {
-	db, err := sql.Open("mysql", "root:password@tcp(127.0.0.1:3306)/")
+func CreateDB(web Website, dbAuth string, dbHost string) {
+	dbSlice := strings.Split(dbHost, ":")
+	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
 	if err != nil {
 		fmt.Println(err.Error())
 	}
@@ -109,43 +121,76 @@ func CreateDB(web Website) {
 	if err != nil {
 		fmt.Println(err.Error())
 	}
-	_,err = db.Exec(fmt.Sprintf("GRANT ALL ON wp_%s.* to %s@localhost identified by '%s'", web.Username, web.Username, web.Password))
+	_,err = db.Exec(fmt.Sprintf("GRANT ALL ON wp_%s.* to %s@%s identified by '%s'", web.Username, web.Username, dbSlice[0], web.Password))
 	if err != nil {
 		fmt.Println(err.Error())
 	}
 }
 
-func SetupScript(web Website) {
-	newpath := filepath.Join(".", web.Username)
+func AddUser(web Website, dbAuth string, dbHost string) {
+	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO vsftpd.users (username, password, email, subdomain) VALUES ('%s',md5('%s'), '%s', '%s')", web.Username, web.Password, web.Email, web.Username))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+}
+
+func SetupScript(web Website, dbHost string, dirPath string, confPath string) {
+	newpath := filepath.Join(dirPath, web.Username)
 	if _, err := os.Stat(newpath); os.IsNotExist(err) {
 		os.Mkdir(newpath, os.ModePerm)
 	}
+
 	command := exec.Command("tar", "xzvf", "wordpress.zip", "--strip-components", "1", "-C", newpath)
 	err := command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
+
 	err = os.Rename(newpath+"/wp-config-sample.php", newpath+"/wp-config.php")
 	if err != nil {
 		fmt.Println(err)
 	}
-	command = exec.Command("sed", "-i", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
+
+	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
-	command = exec.Command("sed", "-i", fmt.Sprintf("s/nama_pengguna_di_sini/%s/g", web.Username), newpath+"/wp-config.php")
+
+	command = exec.Command("sed","-i", "", fmt.Sprintf("s/nama_pengguna_di_sini/%s/g", web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
-	command = exec.Command("sed", "-i", fmt.Sprintf("s/kata_sandi_di_sini/%s/g", web.Password), newpath+"/wp-config.php")
+
+	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/kata_sandi_di_sini/%s/g", web.Password), newpath+"/wp-config.php")
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/localhost/%s/g", dbHost), newpath+"/wp-config.php")
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	command = exec.Command("cp", "./app.conf", filepath.Join(confPath, web.Username))
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/USER_NAME/%s/g", web.Username), filepath.Join(confPath, web.Username))
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 }
-
 
 func SendMessage(conn *amqp.Connection, service string) {
 	channel, err := conn.Channel()
@@ -187,4 +232,5 @@ type Website struct {
 	Email  string
 	SiteName string
 	Password string
+	SubDomain string
 }

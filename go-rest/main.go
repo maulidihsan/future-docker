@@ -1,13 +1,15 @@
 package main
 
 import (
+	"flag"
 	"log"
-	"fmt"
 	"net/http"
 	"encoding/json"
 	"github.com/streadway/amqp"
     "github.com/gorilla/mux"
 )
+
+var AMQP *amqp.Connection
 
 func get(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
@@ -23,7 +25,6 @@ func post(w http.ResponseWriter, r *http.Request) {
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
 	}
-	fmt.Println(web)
 	SendMessage(web)
     w.WriteHeader(http.StatusCreated)
     w.Write([]byte(`{"message": "request being processed"}`))
@@ -48,13 +49,7 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func SendMessage(newWeb Website) {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672")
-	if err != nil {
-        panic("could not establish connection with RabbitMQ:" + err.Error())
-	}
-	defer conn.Close()
-
-	channel, err := conn.Channel()
+	channel, err := AMQP.Channel()
     if err != nil {
         panic("could not open RabbitMQ channel:" + err.Error())
     }
@@ -87,24 +82,39 @@ func SendMessage(newWeb Website) {
 			Body: msg,
 		},
 	)
-	fmt.Println("checked")
     if err != nil {
         panic("error publishing a message to the queue:" + err.Error())
     }
 }
 
 func main() {
-    r := mux.NewRouter()
+	portPtr := flag.String("port", "3000", "listening port")
+	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
+	flag.Parse()
+	conn, err := amqp.Dial("amqp://"+*rabbitmqPtr)
+	if err != nil {
+        panic("could not establish connection with RabbitMQ:" + err.Error())
+	}
+	AMQP = conn
+	defer conn.Close()
+
+	r := mux.NewRouter()
     r.HandleFunc("/", get).Methods(http.MethodGet)
     r.HandleFunc("/", post).Methods(http.MethodPost)
     r.HandleFunc("/", put).Methods(http.MethodPut)
     r.HandleFunc("/", delete).Methods(http.MethodDelete)
-    r.HandleFunc("/", notFound)
-    log.Fatal(http.ListenAndServe(":3000", r))
+	r.HandleFunc("/", notFound)
+	log.Print("serving on:"+ *portPtr)
+	log.Fatal(http.ListenAndServe(":"+*portPtr, r))
+}
+
+type rabbitConn struct {
+    rb *amqp.Connection
 }
 
 type Website struct {
     Username string `json:"username"`
 	Email  string `json:"email"`
 	SiteName string `json:"sitename"`
+	SubDomain string `json:"subdomain"`
 }

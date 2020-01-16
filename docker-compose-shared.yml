@@ -31,9 +31,9 @@ services:
       - "./nginx2/conf.d:/etc/nginx/conf.d"
       - "./:/opt/app"
     deploy:
-      placement:
-        constraints:
-          - node.role == worker
+      # placement:
+      #   constraints:
+      #     - node.role == worker
       labels:
         - "type=nginx"
         - "traefik.enable=true"
@@ -49,17 +49,17 @@ services:
     stdin_open: true
     tty: true
     deploy:
-      placement:
-        constraints:
-          - node.role == worker
+      # placement:
+      #   constraints:
+      #     - node.role == worker
   redis:
     image: maulidihsan/redis
     networks:
       - traefik-public
     deploy:
-      placement:
-        constraints:
-          - node.role == worker
+      # placement:
+      #   constraints:
+      #     - node.role == worker
 networks:
   traefik-public:
     external: true
