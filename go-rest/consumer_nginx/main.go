@@ -1,17 +1,20 @@
 package main
 
 import (
+	"flag"
 	"os/exec"
 	"github.com/streadway/amqp"
 	"fmt"
 )
 
 func main() {
-    ReceiveMessage()
+	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
+	flag.Parse()
+	ReceiveMessage(*rabbitmqPtr)
 }
 
-func ReceiveMessage() {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672")
+func ReceiveMessage(connString string) {
+	conn, err := amqp.Dial("amqp://"+connString)
 	if err != nil {
         panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
