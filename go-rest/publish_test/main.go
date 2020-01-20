@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
+	"gopkg.in/gomail.v2"
 )
 
 
@@ -55,7 +56,7 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 
 	err = channel.QueueBind(
 		"test", // queue name
-		"create.dir", // routing key
+		"web_events", // routing key
 		"events", // exchange name
 		false,
 		nil,
@@ -80,22 +81,49 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 	}
 
 	forever := make(chan bool)
-
 	go func() {
 		for m := range msgs {
 			msg := string(m.Body)
 			website := Website{}
 			json.Unmarshal([]byte(msg), &website)
-			website.Password = String(8)
-			CreateDB(website, dbAuth, dbHost)
-			AddUser(website, dbAuth, dbHost)
-			SetupScript(website, dbHost, dirPath, confPath)
-			SendMessage(conn, stack+"_nginx")
+			if (website.Action == "create") {
+				website.Password = String(12)
+				CreateDB(website, dbAuth, dbHost)
+				AddUser(website, dbAuth, dbHost)
+				SetupScript(website, dbHost, dirPath, confPath)
+				SendMail(website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username:%s<br />Password:%s", website.Username, website.Password))	
+			} else if (website.Action == "update") {
+				UpdateWeb(website, dbAuth, dbHost, confPath)
+				SendMail(website.Email, "Perubahan Subdomain Berhasil", fmt.Sprintf("Perubahan subdomain ke %s berhasil", website.SubDomain))
+			} else if (website.Action == "delete") {
+				RemoveWeb(website, dbAuth, dbHost, dirPath, confPath)
+				RestartNginx(conn, stack+"_nginx")
+			}
+			RestartNginx(conn, stack+"_nginx")
 			m.Ack(false)
 		}
 	}()
 	fmt.Printf(" [*] Waiting for messages. To exit press CTRL+C")
 	<-forever
+}
+
+func SendMail(to string, title string, msg string) {
+	mailer := gomail.NewMessage()
+	mailer.SetHeader("From", "no-reply@mail.websiteku.local")
+	mailer.SetHeader("To", to)
+	mailer.SetHeader("Subject", title)
+	mailer.SetBody("text/html", msg)
+	dialer := gomail.NewDialer(
+        "192.168.56.5",
+		587,
+		"",
+		"",
+    )
+
+    err := dialer.DialAndSend(mailer)
+    if err != nil {
+        fmt.Println(err.Error())
+    }
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -155,44 +183,69 @@ func SetupScript(web Website, dbHost string, dirPath string, confPath string) {
 		fmt.Println(err)
 	}
 
-	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
+	command = exec.Command("sed", "-i", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("sed","-i", "", fmt.Sprintf("s/nama_pengguna_di_sini/%s/g", web.Username), newpath+"/wp-config.php")
+	command = exec.Command("sed","-i", fmt.Sprintf("s/nama_pengguna_di_sini/%s/g", web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/kata_sandi_di_sini/%s/g", web.Password), newpath+"/wp-config.php")
+	command = exec.Command("sed", "-i", fmt.Sprintf("s/kata_sandi_di_sini/%s/g", web.Password), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/localhost/%s/g", dbHost), newpath+"/wp-config.php")
+	command = exec.Command("sed", "-i", fmt.Sprintf("s/localhost/%s/g", dbHost), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("cp", "./app.conf", filepath.Join(confPath, web.Username))
-	err = command.Run()
-	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	f, err := os.Create(fmt.Sprintf("%s/%s.conf", confPath, web.Username))
+    if err != nil {
+        fmt.Println(err)
+        return
 	}
+	conf := `server {
+        listen       80;
+        server_name  `+web.Username + `.website.ku;
 
-	command = exec.Command("sed", "-i", "", fmt.Sprintf("s/USER_NAME/%s/g", web.Username), filepath.Join(confPath, web.Username))
-	err = command.Run()
-	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
-	}
+        # note that these lines are originally from the "location /" block
+        root   /opt/app/`+web.Username+`;
+        index index.php index.html index.htm;
+
+        error_page 404 /404.html;
+        error_page 500 502 503 504 /50x.html;
+
+        location = /50x.html {
+            root /usr/share/nginx/html;
+        }
+
+        location ~ \.php$ {
+            resolver 127.0.0.11 ipv6=off;
+            set $phpFPMHost "php-fpm:9000";
+            try_files $uri =404;
+            fastcgi_pass $phpFPMHost;
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            include fastcgi_params;
+        }
+    }`
+    l, err := f.WriteString(conf)
+    if err != nil {
+        fmt.Println(err)
+        f.Close()
+        return
+    }
 }
 
-func SendMessage(conn *amqp.Connection, service string) {
+func RestartNginx(conn *amqp.Connection, service string) {
 	channel, err := conn.Channel()
     if err != nil {
         panic("could not open RabbitMQ channel:" + err.Error())
@@ -201,7 +254,7 @@ func SendMessage(conn *amqp.Connection, service string) {
 
 	err = channel.ExchangeDeclare(
 		"events", // name
-		"topic",  // type
+		"direct",  // type
 		true,     // durable
 		false,    // auto-deleted
 		false,    // internal
@@ -214,7 +267,7 @@ func SendMessage(conn *amqp.Connection, service string) {
 
 	err = channel.Publish(
 		"events", 	  // exchange
-		"service", // routing key
+		"service_events", // routing key
 		false, 		  // mandatory
 		false,  	  // immediate
 		amqp.Publishing{
@@ -227,10 +280,54 @@ func SendMessage(conn *amqp.Connection, service string) {
     }
 }
 
+func UpdateWeb(web Website, dbAuth string, dbHost string, confPath string) {
+	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	var subdomain string
+	row := db.QueryRow(`SELECT subdomain FROM vsftpd.users WHERE username='$1';`, web.Username)
+	err = row.Scan(&subdomain)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	_, err = db.Exec(fmt.Sprintf("UPDATE vsftpd.users SET subdomain='%s' WHERE username='%s'", web.SubDomain, web.Username))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	command := exec.Command("sed", "-i", fmt.Sprintf("s/%s/%s/g", subdomain, web.SubDomain), fmt.Sprintf("%s/%s.conf", confPath, web.Username))
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+}
+
+func RemoveWeb(web Website, dbAuth string, dbHost string, dirPath string, confPath string) {
+	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	_, err = db.Exec(fmt.Sprintf("DELETE FROM vsftpd.users WHERE WHERE username='%s'", web.Username))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	command := exec.Command("rm", "-rf", filepath.Join(dirPath, web.Username))
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	command = exec.Command("rm", "-f", fmt.Sprintf("%s/%s.conf", dirPath, web.Username))
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+}
+
 type Website struct {
     Username string
 	Email  string
-	SiteName string
 	Password string
 	SubDomain string
+	Action string
 }

@@ -41,7 +41,7 @@ func ReceiveMessage(connString string) {
 
 	err = channel.QueueBind(
 		"test", // queue name
-		"service", // routing key
+		"service_events", // routing key
 		"events", // exchange name
 		false,
 		nil,

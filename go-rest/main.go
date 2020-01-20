@@ -3,21 +3,29 @@ package main
 import (
 	"flag"
 	"log"
+	"fmt"
 	"net/http"
 	"encoding/json"
+	"database/sql"
 	"github.com/streadway/amqp"
     "github.com/gorilla/mux"
 )
 
 var AMQP *amqp.Connection
+var DBCon *sql.DB
 
 func get(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(`{"message": "get called"}`))
+	
+	resp, err := json.Marshal(GetAllWeb())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.WriteHeader(http.StatusOK)
+    w.Write(resp)
 }
 
-func post(w http.ResponseWriter, r *http.Request) {
+func postCreate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var web Website
 	err := json.NewDecoder(r.Body).Decode(&web)
@@ -25,27 +33,38 @@ func post(w http.ResponseWriter, r *http.Request) {
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
 	}
+	web.Action = "create"
 	SendMessage(web)
     w.WriteHeader(http.StatusCreated)
     w.Write([]byte(`{"message": "request being processed"}`))
 }
 
-func put(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusAccepted)
-    w.Write([]byte(`{"message": "put called"}`))
+func postUpdate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var web Website
+	err := json.NewDecoder(r.Body).Decode(&web)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+	}
+	web.Action = "update"
+	SendMessage(web)
+    w.WriteHeader(http.StatusCreated)
+    w.Write([]byte(`{"message": "request being processed"}`))
 }
 
-func delete(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(`{"message": "delete called"}`))
-}
-
-func notFound(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusNotFound)
-    w.Write([]byte(`{"message": "not found"}`))
+func postDelete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var web Website
+	err := json.NewDecoder(r.Body).Decode(&web)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+	}
+	web.Action = "delete"
+	SendMessage(web)
+    w.WriteHeader(http.StatusCreated)
+    w.Write([]byte(`{"message": "request being processed"}`))
 }
 
 func SendMessage(newWeb Website) {
@@ -57,7 +76,7 @@ func SendMessage(newWeb Website) {
 
 	err = channel.ExchangeDeclare(
 		"events", // name
-		"topic",  // type
+		"direct",  // type
 		true,     // durable
 		false,    // auto-deleted
 		false,    // internal
@@ -75,7 +94,7 @@ func SendMessage(newWeb Website) {
 
 	err = channel.Publish(
 		"events", 	  // exchange
-		"create.dir", // routing key
+		"web_events", // routing key
 		false, 		  // mandatory
 		false,  	  // immediate
 		amqp.Publishing{
@@ -87,34 +106,56 @@ func SendMessage(newWeb Website) {
     }
 }
 
+func GetAllWeb() []Website {
+	rows, err := DBCon.Query("SELECT username, subdomain FROM vsftpd.users")
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	defer rows.Close()
+	var results []Website
+	for rows.Next() {
+		web := Website{}
+		err = rows.Scan(&web.Username, &web.SubDomain)
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+		results = append(results, web)
+	}
+	return results
+}
+
 func main() {
 	portPtr := flag.String("port", "3000", "listening port")
 	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
+	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
+	dbhostPtr := flag.String("db", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
+	
 	flag.Parse()
-	conn, err := amqp.Dial("amqp://"+*rabbitmqPtr)
+
+	DBCon, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", *dbauthPtr, *dbhostPtr))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	defer DBCon.Close()
+
+	AMQP, err := amqp.Dial("amqp://"+*rabbitmqPtr)
 	if err != nil {
         panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
-	AMQP = conn
-	defer conn.Close()
+	defer AMQP.Close()
 
 	r := mux.NewRouter()
     r.HandleFunc("/", get).Methods(http.MethodGet)
-    r.HandleFunc("/", post).Methods(http.MethodPost)
-    r.HandleFunc("/", put).Methods(http.MethodPut)
-    r.HandleFunc("/", delete).Methods(http.MethodDelete)
-	r.HandleFunc("/", notFound)
+    r.HandleFunc("/create", postCreate).Methods(http.MethodPost)
+    r.HandleFunc("/update", postUpdate).Methods(http.MethodPost)
+    r.HandleFunc("/delete", postDelete).Methods(http.MethodPost)
 	log.Print("serving on:"+ *portPtr)
 	log.Fatal(http.ListenAndServe(":"+*portPtr, r))
-}
-
-type rabbitConn struct {
-    rb *amqp.Connection
 }
 
 type Website struct {
     Username string `json:"username"`
 	Email  string `json:"email"`
-	SiteName string `json:"sitename"`
 	SubDomain string `json:"subdomain"`
+	Action string
 }
