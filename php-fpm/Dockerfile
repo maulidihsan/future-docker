@@ -9,7 +9,8 @@ RUN yum install -y http://rpms.remirepo.net/enterprise/remi-release-7.rpm && \
 
 RUN yum install -y php-fpm php-xml php-cli php-bcmath php-dba php-gd php-intl php-mbstring php-mysql php-pdo php-soap php-pecl-redis php-pecl-imagick
 
-RUN useradd -M -d /opt/app -s /bin/false nginx
+#RUN useradd -M -d /opt/app -s /bin/false nginx
+RUN useradd -M -s /bin/false -u 1000 nginx
 
 RUN mkdir -p /run/php-fpm && \
     chown nginx:nginx /run/php-fpm

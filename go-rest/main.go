@@ -8,19 +8,20 @@ import (
 	"encoding/json"
 	"database/sql"
 	"github.com/streadway/amqp"
-    "github.com/gorilla/mux"
+	"github.com/gorilla/mux"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 var AMQP *amqp.Connection
 var DBCon *sql.DB
 
 func get(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-	
 	resp, err := json.Marshal(GetAllWeb())
 	if err != nil {
+		fmt.Println(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
     w.Write(resp)
 }
@@ -74,22 +75,22 @@ func SendMessage(newWeb Website) {
     }
 	defer channel.Close()
 
-	err = channel.ExchangeDeclare(
-		"events", // name
-		"direct",  // type
-		true,     // durable
-		false,    // auto-deleted
-		false,    // internal
-		false,    // no-wait
-		nil,      // arguments
-	)
-    if err != nil {
-        panic(err)
-	}
+	// err = channel.ExchangeDeclare(
+	// 	"events", // name
+	// 	"direct",  // type
+	// 	true,     // durable
+	// 	false,    // auto-deleted
+	// 	false,    // internal
+	// 	false,    // no-wait
+	// 	nil,      // arguments
+	// )
+    // if err != nil {
+    //     panic(err)
+	// }
 
 	msg, err := json.Marshal(newWeb)
 	if err != nil {
-		panic(err)
+		panic("cannot convert to json "+ err.Error())
 	}
 
 	err = channel.Publish(
@@ -113,13 +114,13 @@ func GetAllWeb() []Website {
 	}
 	defer rows.Close()
 	var results []Website
+	var tmp Website
 	for rows.Next() {
-		web := Website{}
-		err = rows.Scan(&web.Username, &web.SubDomain)
+		err = rows.Scan(&tmp.Username, &tmp.SubDomain)
 		if err != nil {
 			fmt.Println(err.Error())
 		}
-		results = append(results, web)
+		results = append(results, tmp)
 	}
 	return results
 }
@@ -128,17 +129,17 @@ func main() {
 	portPtr := flag.String("port", "3000", "listening port")
 	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
 	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
-	dbhostPtr := flag.String("db", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
+	dbhostPtr := flag.String("mysql-host", "127.0.0.1:3006", "mysql host (127.0.0.1:3306)")
 	
 	flag.Parse()
-
-	DBCon, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", *dbauthPtr, *dbhostPtr))
+	var err error
+	DBCon, err = sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", *dbauthPtr, *dbhostPtr))
 	if err != nil {
 		fmt.Println(err.Error())
 	}
 	defer DBCon.Close()
 
-	AMQP, err := amqp.Dial("amqp://"+*rabbitmqPtr)
+	AMQP, err = amqp.Dial("amqp://"+*rabbitmqPtr)
 	if err != nil {
         panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
@@ -157,5 +158,5 @@ type Website struct {
     Username string `json:"username"`
 	Email  string `json:"email"`
 	SubDomain string `json:"subdomain"`
-	Action string
+	Action string `json: "action"`
 }

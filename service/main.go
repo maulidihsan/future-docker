@@ -3,26 +3,27 @@ package main
 import (
 	"fmt"
 	"flag"
-	"strings"
 	"os"
 	"os/exec"
 	"math/rand"
 	"time"
+	"bytes"
 	"path/filepath"
 	"database/sql"
 	"encoding/json"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
-	"gopkg.in/gomail.v2"
+	"net/smtp"
 )
 
+const IP = "192.168.56.5"
 
 func main() {
 	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
 	stackNamePtr := flag.String("stack-name", "shared", "docker stack name")
 	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
-	dbhostPtr := flag.String("db", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
-	dirPathPtr := flag.String("dir", "./", "wordpress root path")
+	dbhostPtr := flag.String("mysql-host", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
+	dirPathPtr := flag.String("file-dir", "./", "wordpress root path")
 	confPathPtr := flag.String("conf-dir", "./", "nginx conf path")
 	flag.Parse()
     ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dbauthPtr, *dbhostPtr, *dirPathPtr, *confPathPtr)
@@ -86,11 +87,12 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 			msg := string(m.Body)
 			website := Website{}
 			json.Unmarshal([]byte(msg), &website)
+			fmt.Println(website)
 			if (website.Action == "create") {
 				website.Password = String(12)
 				CreateDB(website, dbAuth, dbHost)
 				AddUser(website, dbAuth, dbHost)
-				SetupScript(website, dbHost, dirPath, confPath)
+				SetupScript(website, dirPath, confPath)
 				SendMail(website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username:%s<br />Password:%s", website.Username, website.Password))	
 			} else if (website.Action == "update") {
 				UpdateWeb(website, dbAuth, dbHost, confPath)
@@ -107,22 +109,23 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 }
 
 func SendMail(to string, title string, msg string) {
-	mailer := gomail.NewMessage()
-	mailer.SetHeader("From", "no-reply@mail.websiteku.local")
-	mailer.SetHeader("To", to)
-	mailer.SetHeader("Subject", title)
-	mailer.SetBody("text/html", msg)
-	dialer := gomail.NewDialer(
-        "192.168.56.5",
-		587,
-		"",
-		"",
-    )
+	c, err := smtp.Dial(fmt.Sprintf("%s:587", IP))
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	defer c.Close()
+	c.Mail("no-reply@website.ku")
+	c.Rcpt(to)
 
-    err := dialer.DialAndSend(mailer)
-    if err != nil {
-        fmt.Println(err.Error())
-    }
+	wc, err := c.Data()
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	defer wc.Close()
+	buf := bytes.NewBufferString(msg)
+	if _, err = buf.WriteTo(wc); err != nil {
+		fmt.Println(err.Error())
+	}
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -139,7 +142,6 @@ func String(length int) string {
 }
 
 func CreateDB(web Website, dbAuth string, dbHost string) {
-	dbSlice := strings.Split(dbHost, ":")
 	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
 	if err != nil {
 		fmt.Println(err.Error())
@@ -148,7 +150,7 @@ func CreateDB(web Website, dbAuth string, dbHost string) {
 	if err != nil {
 		fmt.Println(err.Error())
 	}
-	_,err = db.Exec(fmt.Sprintf("GRANT ALL ON wp_%s.* to %s@%s identified by '%s'", web.Username, web.Username, dbSlice[0], web.Password))
+	_,err = db.Exec(fmt.Sprintf("GRANT ALL ON wp_%s.* to %s@'%%' identified by '%s'", web.Username, web.Username, web.Password))
 	if err != nil {
 		fmt.Println(err.Error())
 	}
@@ -165,13 +167,13 @@ func AddUser(web Website, dbAuth string, dbHost string) {
 	}
 }
 
-func SetupScript(web Website, dbHost string, dirPath string, confPath string) {
+func SetupScript(web Website, dirPath string, confPath string) {
 	newpath := filepath.Join(dirPath, web.Username)
 	if _, err := os.Stat(newpath); os.IsNotExist(err) {
 		os.Mkdir(newpath, os.ModePerm)
 	}
 
-	command := exec.Command("tar", "xzvf", "wordpress.zip", "--strip-components", "1", "-C", newpath)
+	command := exec.Command("tar", "xzvf", dirPath+"/wordpress.tar.gz", "--strip-components", "1", "-C", newpath)
 	err := command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
@@ -200,7 +202,7 @@ func SetupScript(web Website, dbHost string, dirPath string, confPath string) {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("sed", "-i", fmt.Sprintf("s/localhost/%s/g", dbHost), newpath+"/wp-config.php")
+	command = exec.Command("sed", "-i", fmt.Sprintf("s/localhost/%s:3306/g", IP), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)

@@ -28,14 +28,13 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - "./nginx2/conf.d:/etc/nginx/conf.d"
-      - "./:/opt/app"
+      - "/mnt/nginx:/etc/nginx/conf.d"
+      - "/mnt/wordpress:/opt/app"
     deploy:
-      # placement:
-      #   constraints:
-      #     - node.role == worker
+      placement:
+        constraints:
+          - node.role == worker
       labels:
-        - "type=nginx"
         - "traefik.enable=true"
         - "traefik.http.routers.nginx.rule=HostRegexp(`{subdomain:[a-z]+}.website.ku`)"
         - "traefik.http.routers.nginx.entrypoints=web"
@@ -45,22 +44,106 @@ services:
     networks:
       - traefik-public
     volumes:
-      - "./:/opt/app"
+      - "/mnt/wordpress:/opt/app"
     stdin_open: true
     tty: true
     deploy:
-      # placement:
-      #   constraints:
-      #     - node.role == worker
+      placement:
+        constraints:
+          - node.role == worker
   redis:
     image: maulidihsan/redis
     networks:
       - traefik-public
     deploy:
-      # placement:
-      #   constraints:
-      #     - node.role == worker
+      placement:
+        constraints:
+          - node.role == worker
+
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command: 
+      - '--path.procfs=/host/proc' 
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - 8088:8080
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - monitor-net     
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.prometheus.rule=HostRegexp(`prom.dash-website.ku`)"
+        - "traefik.http.routers.prometheus.entrypoints=web"
+        - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+      restart_policy:
+        condition: on-failure
+  grafana:
+    image: grafana/grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    networks:
+      - monitor-net
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      labels:
+        - "traefik.http.routers.grafana.rule=HostRegexp(`grafana.dash-website.ku`)"
+        - "traefik.http.routers.grafana.entrypoints=web"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      restart_policy:
+        condition: on-failure
 networks:
   traefik-public:
     external: true
+  monitor-net:
+    driver: overlay
+    external: true
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
 
