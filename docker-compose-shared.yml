@@ -31,6 +31,10 @@ services:
       - "/mnt/nginx:/etc/nginx/conf.d"
       - "/mnt/wordpress:/opt/app"
     deploy:
+      mode: replicated
+      replicas: 3
+      restart_policy:
+        condition: on-failure
       placement:
         constraints:
           - node.role == worker
@@ -48,6 +52,10 @@ services:
     stdin_open: true
     tty: true
     deploy:
+      mode: replicated
+      replicas: 3
+      restart_policy:
+        condition: on-failure
       placement:
         constraints:
           - node.role == worker
@@ -56,6 +64,10 @@ services:
     networks:
       - traefik-public
     deploy:
+      mode: replicated
+      replicas: 3
+      restart_policy:
+        condition: on-failure
       placement:
         constraints:
           - node.role == worker
@@ -136,14 +148,29 @@ services:
         - "traefik.http.services.grafana.loadbalancer.server.port=3000"
       restart_policy:
         condition: on-failure
+  rabbitmq:
+    image: maulidihsan/rabbitmq
+    networks:
+      - traefik-public
+    command:
+      - "rabbitmqctl add_user rabbituser password &&"
+      - "rabbitmqctl add_vhost websiteku &&"
+      - "rabbitmqctl set_permissions -p websiteku rabbituser '.*' '.*' '.*'"
+    deploy:
+      labels:
+        - "traefik.http.routers.rabbitmq.rule=HostRegexp(`rabbitmq.dash-website.ku`)"
+        - "traefik.http.routers.rabbitmq.entrypoints=web"
+        - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
+        - "traefik.tcp.routers.rabbitmq.rule=HostRegexp(`rabbitmq.dash-website.ku`)"
+        - "traefik.tcp.services.rabbitmq.loadbalancer.server.port=5672"
+      restart_policy:
+        condition: on-failure
 networks:
   traefik-public:
     external: true
   monitor-net:
-    driver: overlay
     external: true
 
 volumes:
   prometheus_data: {}
   grafana_data: {}
-

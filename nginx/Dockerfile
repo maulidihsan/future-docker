@@ -9,5 +9,7 @@ ADD nginx.conf.tmpl /
 ADD entrypoint.sh /usr/bin/entrypoint
 RUN yum clean all
 
+EXPOSE 80
+
 ENTRYPOINT ["entrypoint"]
 CMD ["nginx"]

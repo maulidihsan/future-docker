@@ -21,6 +21,8 @@ COPY php-fpm.conf /etc/php-fpm.conf
 COPY www.conf /etc/php-fpm.d/www.conf
 COPY php.ini /etc/php.ini
 
+EXPOSE 9000
+
 RUN yum clean all
 
 CMD ["php-fpm"]

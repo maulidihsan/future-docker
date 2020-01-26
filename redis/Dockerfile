@@ -5,6 +5,7 @@ RUN yum install epel-release -y && \
     yum clean all
 
 ADD redis.conf /etc/redis.conf
-ADD entrypoint.sh /usr/bin/entrypoint
+
 EXPOSE 6379
+
 CMD ["/usr/bin/redis-server", "/etc/redis.conf"]

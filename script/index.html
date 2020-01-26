@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Portal Websiteku</title>
+        <link href='https://fonts.googleapis.com/css?family=Raleway:400,300,600' rel='stylesheet' type='text/css'>
+        <link href="css/skeleton.css" rel="stylesheet" type="text/css">
+        <link href="css/custom.css" rel="stylesheet" type="text/css">
+    </head>
+    <body>
+        <div class="navBar" id="mainNavBar">
+            <a href="#">Website Ku</a>
+        </div>
+        <div id="app">
+            <div>
+                <div class="section hero">
+                    <div class="container">
+                        <div class="row">
+                            <div class="six columns offset-by-three">
+                                <h4>Registrasi Web Baru</h4>
+                                <form>
+                                    <div class="row">
+                                        <label for="usernameInput">Username</label>
+                                        <input class="u-full-width" v-model="username" type="text" placeholder="username" id="usernameInput">
+                                        
+                                        <label for="emailInput">Email</label>
+                                        <input class="u-full-width" v-model="email" type="email" placeholder="mail@domain.com" id="emailInput">
+                                        
+                                        <input class="button-primary" @click="submit" type="submit" value="Submit">
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="section get-help">
+                    <div class="container">
+                        <div class="row">
+                            <div class="eleven columns">
+                                <h4>Pengguna Terdaftar</h4>
+                                <table class="u-full-width">
+                                    <thead>
+                                    <tr>
+                                        <th>Username</th>
+                                        <th>Link</th>
+                                        <th>Action</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    <tr v-for="user in listUser">
+                                        <td>{{user.username}}</td>
+                                        <td><a :href="'http://'+user.subdomain+'.website.ku'">{{user.subdomain}}.website.ku</a></td>
+                                        <td><a href="#" @click="editModal(user)">Edit</a> | <a href="#" @click="deleteModal(user)">Delete</a></td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal" :class="editModalShow ? 'modal-open' : ''">
+                    <div class="modal-inner">
+                        <div class="modal-content">
+                            <div class="modal-close-icon">
+                                <a href="javascript:void(0)" class="close-modal"><i class="fa fa-times" aria-hidden="true"></i></a>
+                            </div>
+                            <div class="modal-content-inner">
+                                <h5>Edit Subdomain for {{selected.subdomain}}.website.ku</h5>
+                                <input class="u-full-width" v-model="subdomain" type="text" placeholder="subdomain">  
+                            </div>
+                            <hr class="modal-buttons-seperator">
+                            <div class="modal-buttons">
+                                <button @click="toggleEdit" class="button">Cancel</button>
+                                <button @click="updateBtn" class="button button-primary">OK</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal" :class="deleteModalShow ? 'modal-open' : ''">
+                    <div class="modal-inner">
+                        <div class="modal-content">
+                            <div class="modal-close-icon">
+                                <a href="javascript:void(0)" class="close-modal"><i class="fa fa-times" aria-hidden="true"></i></a>
+                            </div>
+                            <div class="modal-content-inner">
+                                <h5>Delete user {{selected.username}}</h5>
+                                <p>Are you sure?</p>  
+                            </div>
+                            <hr class="modal-buttons-seperator">
+                            <div class="modal-buttons">
+                                <button @click="toggleDelete" class="button">Cancel</button>
+                                <button @click="deleteBtn" class="button button-primary">Yes</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/vue"></script>
+        <script src="js/custom.js"></script>
+    </body>
+</html>

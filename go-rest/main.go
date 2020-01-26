@@ -15,19 +15,25 @@ import (
 var AMQP *amqp.Connection
 var DBCon *sql.DB
 
+
+func addHeader(w *http.ResponseWriter) {
+	(*w).Header().Set("Access-Control-Allow-Origin", "*")
+	(*w).Header().Set("Content-Type", "application/json")
+}
+
 func get(w http.ResponseWriter, r *http.Request) {
+
 	resp, err := json.Marshal(GetAllWeb())
 	if err != nil {
 		fmt.Println(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 	}
-	w.Header().Set("Content-Type", "application/json")
+	addHeader(&w)
 	w.WriteHeader(http.StatusOK)
     w.Write(resp)
 }
 
 func postCreate(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var web Website
 	err := json.NewDecoder(r.Body).Decode(&web)
     if err != nil {
@@ -36,12 +42,13 @@ func postCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	web.Action = "create"
 	SendMessage(web)
+
+	addHeader(&w)
     w.WriteHeader(http.StatusCreated)
     w.Write([]byte(`{"message": "request being processed"}`))
 }
 
 func postUpdate(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var web Website
 	err := json.NewDecoder(r.Body).Decode(&web)
     if err != nil {
@@ -50,12 +57,13 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	web.Action = "update"
 	SendMessage(web)
+
+	addHeader(&w)
     w.WriteHeader(http.StatusCreated)
     w.Write([]byte(`{"message": "request being processed"}`))
 }
 
 func postDelete(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	var web Website
 	err := json.NewDecoder(r.Body).Decode(&web)
     if err != nil {
@@ -64,6 +72,8 @@ func postDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	web.Action = "delete"
 	SendMessage(web)
+
+	addHeader(&w)
     w.WriteHeader(http.StatusCreated)
     w.Write([]byte(`{"message": "request being processed"}`))
 }
@@ -74,20 +84,6 @@ func SendMessage(newWeb Website) {
         panic("could not open RabbitMQ channel:" + err.Error())
     }
 	defer channel.Close()
-
-	// err = channel.ExchangeDeclare(
-	// 	"events", // name
-	// 	"direct",  // type
-	// 	true,     // durable
-	// 	false,    // auto-deleted
-	// 	false,    // internal
-	// 	false,    // no-wait
-	// 	nil,      // arguments
-	// )
-    // if err != nil {
-    //     panic(err)
-	// }
-
 	msg, err := json.Marshal(newWeb)
 	if err != nil {
 		panic("cannot convert to json "+ err.Error())
