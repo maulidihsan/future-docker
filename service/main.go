@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"math/rand"
 	"time"
-	"bytes"
+	"encoding/base64"
 	"path/filepath"
 	"database/sql"
 	"encoding/json"
@@ -16,23 +16,22 @@ import (
 	"net/smtp"
 )
 
-const IP = "192.168.56.5"
-
 func main() {
 	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
+	smtpPtr := flag.String("smtp", "192.168.56.5:25", "smtp host")
 	stackNamePtr := flag.String("stack-name", "shared", "docker stack name")
 	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
 	dbhostPtr := flag.String("mysql-host", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
 	dirPathPtr := flag.String("file-dir", "./", "wordpress root path")
 	confPathPtr := flag.String("conf-dir", "./", "nginx conf path")
 	flag.Parse()
-    ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dbauthPtr, *dbhostPtr, *dirPathPtr, *confPathPtr)
+    ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dbauthPtr, *dbhostPtr, *dirPathPtr, *confPathPtr, *smtpPtr)
 }
 
-func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPath string, confPath string) {
+func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPath string, confPath string, smtpAddr string) {
 	conn, err := amqp.Dial("amqp://"+r)
 	if err != nil {
-        panic("could not establish connection with RabbitMQ:" + err.Error())
+		panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
 	defer conn.Close()
 
@@ -40,7 +39,7 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
     if err != nil {
         panic("could not open RabbitMQ channel:" + err.Error())
     }
-	defer channel.Close()
+    defer channel.Close()
 
 	_, err = channel.QueueDeclare(
 		"test", // queue name
@@ -53,7 +52,7 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 
     if err != nil {
         panic("error declaring the queue: " + err.Error())
-	}
+    }
 
 	err = channel.QueueBind(
 		"test", // queue name
@@ -65,8 +64,8 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 
     if err != nil {
         panic("error binding to the queue: " + err.Error())
-	}
-	// We consume data from the queue named Test using the channel we created in go.
+    }
+
 	msgs, err := channel.Consume(
 		"test", // queue name
 		"", // consumer
@@ -79,7 +78,7 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 
     if err != nil {
         panic("error consuming the queue: " + err.Error())
-	}
+    }
 
 	forever := make(chan bool)
 	go func() {
@@ -93,10 +92,16 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 				CreateDB(website, dbAuth, dbHost)
 				AddUser(website, dbAuth, dbHost)
 				SetupScript(website, dirPath, confPath)
-				SendMail(website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username:%s<br />Password:%s", website.Username, website.Password))	
+				err := SendMail(smtpAddr, website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username:%s<br />Password:%s", website.Username, website.Password))
+				if err != nil {
+					fmt.Println(err.Error())
+				}
 			} else if (website.Action == "update") {
 				UpdateWeb(website, dbAuth, dbHost, confPath)
-				SendMail(website.Email, "Perubahan Subdomain Berhasil", fmt.Sprintf("Perubahan subdomain ke %s berhasil", website.SubDomain))
+				err := SendMail(smtpAddr, website.Email, "Perubahan Subdomain Berhasil", fmt.Sprintf("Perubahan subdomain ke %s berhasil", website.SubDomain))
+				if err != nil {
+					fmt.Println(err.Error())
+				}
 			} else if (website.Action == "delete") {
 				RemoveWeb(website, dbAuth, dbHost, dirPath, confPath)
 			}
@@ -108,24 +113,36 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 	<-forever
 }
 
-func SendMail(to string, title string, msg string) {
-	c, err := smtp.Dial(fmt.Sprintf("%s:587", IP))
+func SendMail(addr string, to string, subject string, message string) error {
+	fmt.Println("SENDING MAIL")
+	from := "root@mail.website.ku"
+	c, err := smtp.Dial(fmt.Sprintf("%s", addr))
 	if err != nil {
-		fmt.Println(err.Error())
+			fmt.Println(err.Error())
 	}
 	defer c.Close()
-	c.Mail("no-reply@website.ku")
+	c.Mail(from)
 	c.Rcpt(to)
 
 	wc, err := c.Data()
 	if err != nil {
-		fmt.Println(err.Error())
+			fmt.Println(err.Error())
 	}
-	defer wc.Close()
-	buf := bytes.NewBufferString(msg)
-	if _, err = buf.WriteTo(wc); err != nil {
-		fmt.Println(err.Error())
+	body := "To: " + to + "\r\n" +
+			"From: " + from + "\r\n" +
+			"Subject: " + subject + "\r\n" +
+			"Content-Type: text/html; charset=\"UTF-8\"\r\n" +
+			"Content-Transfer-Encoding: base64\r\n" +
+			"\r\n" + base64.StdEncoding.EncodeToString([]byte(message))
+	_, err = wc.Write([]byte(body))
+	if err != nil {
+			return err
 	}
+	err = wc.Close()
+	if err != nil {
+			return err
+	}
+	return c.Quit()
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -133,15 +150,16 @@ var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 func StringWithCharset(length int, charset string) string {
 	b := make([]byte, length)
 	for i := range b {
-    	b[i] = charset[seededRand.Intn(len(charset))]
+		b[i] = charset[seededRand.Intn(len(charset))]
 	}
 	return string(b)
 }
 func String(length int) string {
-	return StringWithCharset(length, charset)
+    return StringWithCharset(length, charset)
 }
 
 func CreateDB(web Website, dbAuth string, dbHost string) {
+	fmt.Println("CREATING DB")
 	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
 	if err != nil {
 		fmt.Println(err.Error())
@@ -157,6 +175,7 @@ func CreateDB(web Website, dbAuth string, dbHost string) {
 }
 
 func AddUser(web Website, dbAuth string, dbHost string) {
+	fmt.Println("ADDING FTP USER")
 	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
 	if err != nil {
 		fmt.Println(err.Error())
@@ -173,16 +192,14 @@ func SetupScript(web Website, dirPath string, confPath string) {
 		os.Mkdir(newpath, os.ModePerm)
 	}
 
-	command := exec.Command("tar", "xzvf", dirPath+"/wordpress.tar.gz", "--strip-components", "1", "-C", newpath)
+	fmt.Println("UNPACKING WP SCRIPT")
+	command := exec.Command("tar", "--same-owner", "xzf", dirPath+"/wordpress.tar.gz", "-C", newpath)
 	err := command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	err = os.Rename(newpath+"/wp-config-sample.php", newpath+"/wp-config.php")
-	if err != nil {
-		fmt.Println(err)
-	}
+	fmt.Println("SETTING WP CONFIG")
 
 	command = exec.Command("sed", "-i", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
 	err = command.Run()
@@ -202,31 +219,37 @@ func SetupScript(web Website, dirPath string, confPath string) {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
-	command = exec.Command("sed", "-i", fmt.Sprintf("s/localhost/%s:3306/g", IP), newpath+"/wp-config.php")
+	command = exec.Command("sed", "-i", fmt.Sprintf("s/wp_cache_salt/%s/g", web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
 		fmt.Sprintf("cmd.Run() failed with %s\n", err)
 	}
 
+	command = exec.Command("sed", "-i", "s/localhost/192.168.56.5:3306/g", newpath+"/wp-config.php")
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	command = exec.Command("chown", "-R", "1000:1000", newpath)
+	err = command.Run()
+	if err != nil {
+		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+	}
+
+	fmt.Println("SETTING NGINX SCRIPT")
 	f, err := os.Create(fmt.Sprintf("%s/%s.conf", confPath, web.Username))
     if err != nil {
         fmt.Println(err)
         return
-	}
-	conf := `server {
+    }
+    conf := `server {
         listen       80;
         server_name  `+web.Username + `.website.ku;
 
         # note that these lines are originally from the "location /" block
         root   /opt/app/`+web.Username+`;
         index index.php index.html index.htm;
-
-        error_page 404 /404.html;
-        error_page 500 502 503 504 /50x.html;
-
-        location = /50x.html {
-            root /usr/share/nginx/html;
-        }
 
         location ~ \.php$ {
             resolver 127.0.0.11 ipv6=off;
@@ -247,11 +270,11 @@ func SetupScript(web Website, dirPath string, confPath string) {
 }
 
 func RestartNginx(conn *amqp.Connection, service string) {
-	channel, err := conn.Channel()
+    channel, err := conn.Channel()
     if err != nil {
         panic("could not open RabbitMQ channel:" + err.Error())
     }
-	defer channel.Close()
+    defer channel.Close()
 
 	err = channel.ExchangeDeclare(
 		"events", // name
@@ -264,17 +287,17 @@ func RestartNginx(conn *amqp.Connection, service string) {
 	)
     if err != nil {
         panic(err)
-	}
+    }
 
-	err = channel.Publish(
-		"events", 	  // exchange
+    err = channel.Publish(
+		"events",         // exchange
 		"service_events", // routing key
-		false, 		  // mandatory
-		false,  	  // immediate
+		false,            // mandatory
+		false,            // immediate
 		amqp.Publishing{
 			Body: []byte(service),
 		},
-	)
+    )
 
     if err != nil {
         panic("error publishing a message to the queue:" + err.Error())

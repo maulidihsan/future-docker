@@ -4,6 +4,7 @@ services:
     image: traefik:v2.0.2
     command:
       - "--api.dashboard=true"
+      - "--metrics.prometheus=true"
       - "--providers.docker=true"
       - "--providers.docker.endpoint=unix:///var/run/docker.sock"
       - "--providers.docker.swarmMode=true"
@@ -17,10 +18,14 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
     networks:
       - traefik-public
+      - monitor-net
+      - internal
     deploy:
       placement:
         constraints:
           - node.role == manager
+      restart_policy:
+        condition: on-failure
   nginx:
     image: maulidihsan/nginx-shared
     networks:
@@ -28,6 +33,7 @@ services:
     stdin_open: true
     tty: true
     volumes:
+      - "/mnt/static:/opt/static"
       - "/mnt/nginx:/etc/nginx/conf.d"
       - "/mnt/wordpress:/opt/app"
     deploy:
@@ -40,7 +46,7 @@ services:
           - node.role == worker
       labels:
         - "traefik.enable=true"
-        - "traefik.http.routers.nginx.rule=HostRegexp(`{subdomain:[a-z]+}.website.ku`)"
+        - "traefik.http.routers.nginx.rule=HostRegexp(`website.ku`,`{subdomain:[a-z]+}.website.ku`)"
         - "traefik.http.routers.nginx.entrypoints=web"
         - "traefik.http.services.nginx.loadbalancer.server.port=80"
   php-fpm:
@@ -65,13 +71,25 @@ services:
       - traefik-public
     deploy:
       mode: replicated
-      replicas: 3
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
         constraints:
           - node.role == worker
 
+  mysql-exporter:
+    image: prom/mysqld-exporter
+    networks:
+      - monitor-net
+    environment:
+      - DATA_SOURCE_NAME=exporter:prompassword@(192.168.56.5:3306)/
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+ 
   node-exporter:
     image: prom/node-exporter
     volumes:
@@ -83,8 +101,6 @@ services:
       - '--path.sysfs=/host/sys'
       - --collector.filesystem.ignored-mount-points
       - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
-    ports:
-      - 9100:9100
     networks:
       - monitor-net
     deploy:
@@ -99,8 +115,6 @@ services:
       - /var/run:/var/run:rw
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
-    ports:
-      - 8088:8080
     networks:
       - monitor-net
     deploy:
@@ -143,6 +157,7 @@ services:
         constraints:
           - node.role==manager
       labels:
+        - "traefik.enable=true"
         - "traefik.http.routers.grafana.rule=HostRegexp(`grafana.dash-website.ku`)"
         - "traefik.http.routers.grafana.entrypoints=web"
         - "traefik.http.services.grafana.loadbalancer.server.port=3000"
@@ -150,14 +165,20 @@ services:
         condition: on-failure
   rabbitmq:
     image: maulidihsan/rabbitmq
+    ports:
+      - "5672:5672"
     networks:
+      - internal
       - traefik-public
     command:
       - "rabbitmqctl add_user rabbituser password &&"
       - "rabbitmqctl add_vhost websiteku &&"
-      - "rabbitmqctl set_permissions -p websiteku rabbituser '.*' '.*' '.*'"
+      - "rabbitmqctl set_permissions -p websiteku rabbituser '.*' '.*' '.*' &&"
+      - "rabbitmqctl set_permissions -p websiteku admin '.*' '.*' '.*' &&"
+      - "rabbitmqadmin declare exchange --vhost=websiteku name=events type=direct -u admin -p password"
     deploy:
       labels:
+        - "traefik.enable=true"
         - "traefik.http.routers.rabbitmq.rule=HostRegexp(`rabbitmq.dash-website.ku`)"
         - "traefik.http.routers.rabbitmq.entrypoints=web"
         - "traefik.http.services.rabbitmq.loadbalancer.server.port=15672"
@@ -165,12 +186,52 @@ services:
         - "traefik.tcp.services.rabbitmq.loadbalancer.server.port=5672"
       restart_policy:
         condition: on-failure
+  websiteku_rest:
+    image: maulidihsan/websiteku_rest
+    networks:
+      - internal
+      - traefik-public
+    command:
+      - "-rabbitmq=rabbituser:password@rabbitmq:5672/websiteku"
+      - "-mysql-auth=ha_root:password"
+      - "-mysql-host=192.168.56.5:3306"
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.websiteku_rest.rule=HostRegexp(`api.dash-website.ku`)"
+        - "traefik.http.routers.websiteku_rest.entrypoints=web"
+        - "traefik.http.services.websiteku_rest.loadbalancer.server.port=3000"
+      restart_policy:
+        condition: on-failure
+  wp_install:
+    image: maulidihsan/websiteku_wp-install
+    networks:
+      - internal
+    volumes:
+      - "/mnt/wordpress:/opt/app"
+      - "/mnt/nginx:/opt/conf"
+    command:
+      - "-rabbitmq=rabbituser:password@rabbitmq/websiteku"
+      - "-mysql-auth=ha_root:password"
+      - "-smtp=192.168.56.5:25"
+      - "-mysql-host=192.168.56.5:3306"
+      - "-file-dir=/opt/app"
+      - "-conf-dir=/opt/conf"
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+         - node.role==worker
+      restart_policy:
+        condition: on-failure
+
 networks:
   traefik-public:
     external: true
   monitor-net:
     external: true
-
+  internal:
+    external: true
 volumes:
   prometheus_data: {}
   grafana_data: {}
