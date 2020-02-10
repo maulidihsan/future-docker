@@ -3,7 +3,6 @@ services:
   traefik:
     image: traefik:v2.0.2
     command:
-      - "--api.dashboard=true"
       - "--metrics.prometheus=true"
       - "--providers.docker=true"
       - "--providers.docker.endpoint=unix:///var/run/docker.sock"
@@ -12,14 +11,11 @@ services:
       - "--providers.docker.network=traefik-public"
       - "--entrypoints.web.address=:80"
     ports:
-      - "80:80"
-      - "8080:8080"
+      - "8000:80"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
     networks:
       - traefik-public
-      - monitor-net
-      - internal
     deploy:
       placement:
         constraints:
@@ -30,15 +26,17 @@ services:
     image: maulidihsan/nginx-shared
     networks:
       - traefik-public
-    stdin_open: true
-    tty: true
+      - internal
     volumes:
       - "/mnt/static:/opt/static"
       - "/mnt/nginx:/etc/nginx/conf.d"
       - "/mnt/wordpress:/opt/app"
     deploy:
       mode: replicated
-      replicas: 3
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
       restart_policy:
         condition: on-failure
       placement:
@@ -46,20 +44,18 @@ services:
           - node.role == worker
       labels:
         - "traefik.enable=true"
-        - "traefik.http.routers.nginx.rule=HostRegexp(`website.ku`,`{subdomain:[a-z]+}.website.ku`)"
+        - "traefik.http.routers.nginx.rule=HostRegexp(`website.ku`,`{subdomain:[a-z0-9-]+}.website.ku`)"
         - "traefik.http.routers.nginx.entrypoints=web"
         - "traefik.http.services.nginx.loadbalancer.server.port=80"
   php-fpm:
     image: maulidihsan/php-fpm
     networks:
-      - traefik-public
+      - internal
     volumes:
       - "/mnt/wordpress:/opt/app"
-    stdin_open: true
-    tty: true
     deploy:
       mode: replicated
-      replicas: 3
+      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -68,10 +64,10 @@ services:
   redis:
     image: maulidihsan/redis
     networks:
-      - traefik-public
+      - internal
     deploy:
       mode: replicated
-      replicas: 2
+      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -91,14 +87,18 @@ services:
         condition: on-failure
  
   node-exporter:
-    image: prom/node-exporter
+    image: stefanprodan/swarmprom-node-exporter:v0.16.0
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
+      - /etc/hostname:/etc/nodename
+    environment:
+      - NODE_ID={{.Node.ID}}
     command: 
       - '--path.procfs=/host/proc' 
       - '--path.sysfs=/host/sys'
+      - --collector.textfile.directory=/etc/node-exporter/
       - --collector.filesystem.ignored-mount-points
       - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
     networks:
@@ -133,11 +133,12 @@ services:
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
     networks:
-      - monitor-net     
+      - monitor-net
+      - traefik-public     
     deploy:
       placement:
         constraints:
-          - node.role==manager
+          - node.role == manager
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.prometheus.rule=HostRegexp(`prom.dash-website.ku`)"
@@ -145,17 +146,32 @@ services:
         - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
       restart_policy:
         condition: on-failure
-  grafana:
-    image: grafana/grafana
+  alertmanager:
+    image: prom/alertmanager
     volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning/:/etc/grafana/provisioning/
+      - /mnt/alertmanager/config:/etc/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
     networks:
       - monitor-net
     deploy:
       placement:
         constraints:
-          - node.role==manager
+          - node.role == worker
+      restart_policy:
+        condition: on-failure
+  grafana:
+    image: grafana/grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - monitor-net
+      - traefik-public
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.grafana.rule=HostRegexp(`grafana.dash-website.ku`)"
@@ -166,7 +182,7 @@ services:
   rabbitmq:
     image: maulidihsan/rabbitmq
     ports:
-      - "5672:5672"
+      - "5673:5672"
     networks:
       - internal
       - traefik-public
@@ -177,6 +193,9 @@ services:
       - "rabbitmqctl set_permissions -p websiteku admin '.*' '.*' '.*' &&"
       - "rabbitmqadmin declare exchange --vhost=websiteku name=events type=direct -u admin -p password"
     deploy:
+      placement:
+        constraints:
+          - node.role == manager
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.rabbitmq.rule=HostRegexp(`rabbitmq.dash-website.ku`)"
@@ -192,10 +211,13 @@ services:
       - internal
       - traefik-public
     command:
-      - "-rabbitmq=rabbituser:password@rabbitmq:5672/websiteku"
+      - "-rabbitmq=rabbituser:password@rabbitmq/websiteku"
       - "-mysql-auth=ha_root:password"
       - "-mysql-host=192.168.56.5:3306"
     deploy:
+      placement:
+        constraints:
+          - node.role == worker
       labels:
         - "traefik.enable=true"
         - "traefik.http.routers.websiteku_rest.rule=HostRegexp(`api.dash-website.ku`)"
@@ -212,18 +234,21 @@ services:
       - "/mnt/nginx:/opt/conf"
     command:
       - "-rabbitmq=rabbituser:password@rabbitmq/websiteku"
-      - "-mysql-auth=ha_root:password"
       - "-smtp=192.168.56.5:25"
-      - "-mysql-host=192.168.56.5:3306"
       - "-file-dir=/opt/app"
       - "-conf-dir=/opt/conf"
+      - "-stack-name=shared"
     deploy:
       replicas: 2
       placement:
         constraints:
-         - node.role==worker
+          - node.role == worker
       restart_policy:
         condition: on-failure
+
+volumes:
+  grafana_data: {}
+  prometheus_data: {}
 
 networks:
   traefik-public:
@@ -232,6 +257,3 @@ networks:
     external: true
   internal:
     external: true
-volumes:
-  prometheus_data: {}
-  grafana_data: {}

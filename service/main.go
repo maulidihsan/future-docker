@@ -4,31 +4,30 @@ import (
 	"fmt"
 	"flag"
 	"os"
+	"strings"
 	"os/exec"
-	"math/rand"
-	"time"
 	"encoding/base64"
 	"path/filepath"
-	"database/sql"
 	"encoding/json"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
 	"net/smtp"
+	"net/http"
+	"net/url"
+	"time"
+	"io/ioutil"
 )
 
 func main() {
 	rabbitmqPtr := flag.String("rabbitmq", "guest:guest@localhost:5672", "rabbit mq connection string (guest:guest@localhost:5672)")
 	smtpPtr := flag.String("smtp", "192.168.56.5:25", "smtp host")
 	stackNamePtr := flag.String("stack-name", "shared", "docker stack name")
-	dbauthPtr := flag.String("mysql-auth", "root:password", "msyql username:password")
-	dbhostPtr := flag.String("mysql-host", "127.0.0.1:3006", "mysql host (127.0.0.1:3306) root:password@tcp(127.0.0.1:3306)")
 	dirPathPtr := flag.String("file-dir", "./", "wordpress root path")
 	confPathPtr := flag.String("conf-dir", "./", "nginx conf path")
 	flag.Parse()
-    ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dbauthPtr, *dbhostPtr, *dirPathPtr, *confPathPtr, *smtpPtr)
+    ReceiveMessage(*rabbitmqPtr, *stackNamePtr, *dirPathPtr, *confPathPtr, *smtpPtr)
 }
 
-func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPath string, confPath string, smtpAddr string) {
+func ReceiveMessage(r string, stack string, dirPath string, confPath string, smtpAddr string) {
 	conn, err := amqp.Dial("amqp://"+r)
 	if err != nil {
 		panic("could not establish connection with RabbitMQ:" + err.Error())
@@ -87,30 +86,89 @@ func ReceiveMessage(r string, stack string, dbAuth string, dbHost string, dirPat
 			website := Website{}
 			json.Unmarshal([]byte(msg), &website)
 			fmt.Println(website)
-			if (website.Action == "create") {
-				website.Password = String(12)
-				CreateDB(website, dbAuth, dbHost)
-				AddUser(website, dbAuth, dbHost)
-				SetupScript(website, dirPath, confPath)
-				err := SendMail(smtpAddr, website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username:%s<br />Password:%s", website.Username, website.Password))
+			if (website.Action == "install") {
+				err := SetupScript(website, dirPath, confPath)
 				if err != nil {
 					fmt.Println(err.Error())
 				}
-			} else if (website.Action == "update") {
-				UpdateWeb(website, dbAuth, dbHost, confPath)
-				err := SendMail(smtpAddr, website.Email, "Perubahan Subdomain Berhasil", fmt.Sprintf("Perubahan subdomain ke %s berhasil", website.SubDomain))
+
+				RestartNginx(conn, stack+"_nginx")
+				time.Sleep(40 * time.Second)
+
+				err = WordpressRegistration(website)
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+
+				err = SendMail(smtpAddr, website.Email, "Registrasi Web Berhasil", fmt.Sprintf("Registrasi web berhasil<br />Username: %s<br />Password: %s", website.Username, website.Password))
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+			} else if (website.Action == "update_domain") {
+				err := UpdateDomain(website, confPath)
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+
+				err = SendMail(smtpAddr, website.Email, "Perubahan Subdomain Berhasil", fmt.Sprintf("Perubahan subdomain ke %s berhasil", website.SubDomain))
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+				RestartNginx(conn, stack+"_nginx")
+			} else if (website.Action == "reset_password") {
+				err := SendMail(smtpAddr, website.Email, "Password baru anda", fmt.Sprintf("Password baru anda adalah %s", website.Password))
 				if err != nil {
 					fmt.Println(err.Error())
 				}
 			} else if (website.Action == "delete") {
-				RemoveWeb(website, dbAuth, dbHost, dirPath, confPath)
+				Uninstall(website, dirPath, confPath)
+				RestartNginx(conn, stack+"_nginx")
 			}
-			RestartNginx(conn, stack+"_nginx")
 			m.Ack(false)
 		}
 	}()
-	fmt.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+	fmt.Println(" [*] Waiting for messages. To exit press CTRL+C")
 	<-forever
+}
+
+func WordpressRegistration(website Website) error {
+	repeat := 0
+	client := http.Client{
+		Timeout: 60 * time.Second,
+	}
+	for {
+		resp, err := client.Get(fmt.Sprintf("http://%s.website.ku", website.Username))
+		if err != nil {
+			return err
+		}
+
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		fmt.Sprintf("Resp: %s, Retry: %v", string(body), repeat)
+		if ((string(body) != "Available") || repeat > 10) {
+			break
+		}
+
+		repeat++
+		time.Sleep(time.Duration(repeat) * time.Second * 6)
+	}
+	data := url.Values{}
+	data.Set("admin_email", website.Email)
+	data.Set("admin_password", website.Password)
+	data.Set("admin_password2", website.Password)
+	data.Set("user_name", website.Username)
+	data.Set("weblog_title", website.Username)
+	data.Set("Submit", "Install+WordPress")
+
+	r, _ := http.NewRequest("POST", fmt.Sprintf("http://%s.website.ku/wp-admin/install.php?step=2", website.Username), strings.NewReader(data.Encode()))
+	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, _ := client.Do(r)
+	fmt.Println(resp.Status)
+	return nil
 }
 
 func SendMail(addr string, to string, subject string, message string) error {
@@ -118,7 +176,7 @@ func SendMail(addr string, to string, subject string, message string) error {
 	from := "root@mail.website.ku"
 	c, err := smtp.Dial(fmt.Sprintf("%s", addr))
 	if err != nil {
-			fmt.Println(err.Error())
+		fmt.Println(err.Error())
 	}
 	defer c.Close()
 	c.Mail(from)
@@ -126,7 +184,7 @@ func SendMail(addr string, to string, subject string, message string) error {
 
 	wc, err := c.Data()
 	if err != nil {
-			fmt.Println(err.Error())
+		fmt.Println(err.Error())
 	}
 	body := "To: " + to + "\r\n" +
 			"From: " + from + "\r\n" +
@@ -136,7 +194,7 @@ func SendMail(addr string, to string, subject string, message string) error {
 			"\r\n" + base64.StdEncoding.EncodeToString([]byte(message))
 	_, err = wc.Write([]byte(body))
 	if err != nil {
-			return err
+		return err
 	}
 	err = wc.Close()
 	if err != nil {
@@ -145,58 +203,17 @@ func SendMail(addr string, to string, subject string, message string) error {
 	return c.Quit()
 }
 
-const charset = "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-func StringWithCharset(length int, charset string) string {
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[seededRand.Intn(len(charset))]
-	}
-	return string(b)
-}
-func String(length int) string {
-    return StringWithCharset(length, charset)
-}
-
-func CreateDB(web Website, dbAuth string, dbHost string) {
-	fmt.Println("CREATING DB")
-	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_,err = db.Exec(fmt.Sprintf("CREATE DATABASE wp_%s", web.Username))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_,err = db.Exec(fmt.Sprintf("GRANT ALL ON wp_%s.* to %s@'%%' identified by '%s'", web.Username, web.Username, web.Password))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-}
-
-func AddUser(web Website, dbAuth string, dbHost string) {
-	fmt.Println("ADDING FTP USER")
-	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_, err = db.Exec(fmt.Sprintf("INSERT INTO vsftpd.users (username, password, email, subdomain) VALUES ('%s',md5('%s'), '%s', '%s')", web.Username, web.Password, web.Email, web.Username))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-}
-
-func SetupScript(web Website, dirPath string, confPath string) {
+func SetupScript(web Website, dirPath string, confPath string) error {
 	newpath := filepath.Join(dirPath, web.Username)
 	if _, err := os.Stat(newpath); os.IsNotExist(err) {
 		os.Mkdir(newpath, os.ModePerm)
 	}
 
 	fmt.Println("UNPACKING WP SCRIPT")
-	command := exec.Command("tar", "--same-owner", "xzf", dirPath+"/wordpress.tar.gz", "-C", newpath)
+	command := exec.Command("tar", "--same-owner", "-xzf", dirPath+"/wordpress.tar.gz", "-C", newpath)
 	err := command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	fmt.Println("SETTING WP CONFIG")
@@ -204,44 +221,43 @@ func SetupScript(web Website, dirPath string, confPath string) {
 	command = exec.Command("sed", "-i", fmt.Sprintf("s/nama_basis_data_di_sini/%s/g", "wp_"+web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	command = exec.Command("sed","-i", fmt.Sprintf("s/nama_pengguna_di_sini/%s/g", web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	command = exec.Command("sed", "-i", fmt.Sprintf("s/kata_sandi_di_sini/%s/g", web.Password), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	command = exec.Command("sed", "-i", fmt.Sprintf("s/wp_cache_salt/%s/g", web.Username), newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	command = exec.Command("sed", "-i", "s/localhost/192.168.56.5:3306/g", newpath+"/wp-config.php")
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	command = exec.Command("chown", "-R", "1000:1000", newpath)
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
 	fmt.Println("SETTING NGINX SCRIPT")
 	f, err := os.Create(fmt.Sprintf("%s/%s.conf", confPath, web.Username))
     if err != nil {
-        fmt.Println(err)
-        return
+        return err
     }
     conf := `server {
         listen       80;
@@ -253,20 +269,27 @@ func SetupScript(web Website, dirPath string, confPath string) {
 
         location ~ \.php$ {
             resolver 127.0.0.11 ipv6=off;
-            set $phpFPMHost "php-fpm:9000";
             try_files $uri =404;
-            fastcgi_pass $phpFPMHost;
+            set $upstream "php-fpm:9000";
+            fastcgi_pass $upstream;
             fastcgi_index index.php;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_read_timeout 300;
             include fastcgi_params;
+        }
+
+        location ~ \.(ogg|ogv|svg|svgz|eot|otf|woff|mp4|ttf|css|rss|atom|js|jpg|jpeg|gif|png|ico|zip|tgz|gz|rar|bz2|doc|xls|exe|ppt|tar|mid|midi|wav|bmp|rtf)$ {
+            expires max;
+            log_not_found off;
+            access_log off;
         }
     }`
     _, err = f.WriteString(conf)
     if err != nil {
-        fmt.Println(err)
         f.Close()
-        return
+        return err
     }
+    return nil
 }
 
 func RestartNginx(conn *amqp.Connection, service string) {
@@ -304,54 +327,35 @@ func RestartNginx(conn *amqp.Connection, service string) {
     }
 }
 
-func UpdateWeb(web Website, dbAuth string, dbHost string, confPath string) {
-	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
+func UpdateDomain(web Website, confPath string) error {
+	command := exec.Command("sed", "-i", fmt.Sprintf("s/%s/%s/g", web.CurrentSubDomain, web.SubDomain), fmt.Sprintf("%s/%s.conf", confPath, web.Username))
+	err := command.Run()
 	if err != nil {
-		fmt.Println(err.Error())
+		return err
 	}
-	var subdomain string
-	row := db.QueryRow(`SELECT subdomain FROM vsftpd.users WHERE username='$1';`, web.Username)
-	err = row.Scan(&subdomain)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_, err = db.Exec(fmt.Sprintf("UPDATE vsftpd.users SET subdomain='%s' WHERE username='%s'", web.SubDomain, web.Username))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	command := exec.Command("sed", "-i", fmt.Sprintf("s/%s/%s/g", subdomain, web.SubDomain), fmt.Sprintf("%s/%s.conf", confPath, web.Username))
-	err = command.Run()
-	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
-	}
+	return nil
 }
 
-func RemoveWeb(web Website, dbAuth string, dbHost string, dirPath string, confPath string) {
-	db, err := sql.Open("mysql", fmt.Sprintf("%s@tcp(%s)/", dbAuth, dbHost))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_, err = db.Exec(fmt.Sprintf("DELETE FROM vsftpd.users WHERE WHERE username='%s'", web.Username))
-	if err != nil {
-		fmt.Println(err.Error())
-	}
+func Uninstall(web Website, dirPath string, confPath string) error {
 	command := exec.Command("rm", "-rf", filepath.Join(dirPath, web.Username))
-	err = command.Run()
+	err := command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
 
-	command = exec.Command("rm", "-f", fmt.Sprintf("%s/%s.conf", dirPath, web.Username))
+	command = exec.Command("rm", "-f", fmt.Sprintf("%s/%s.conf", confPath, web.Username))
 	err = command.Run()
 	if err != nil {
-		fmt.Sprintf("cmd.Run() failed with %s\n", err)
+		return err
 	}
+	return nil
 }
 
 type Website struct {
     Username string
 	Email  string
 	Password string
+	CurrentSubDomain string
 	SubDomain string
 	Action string
 }

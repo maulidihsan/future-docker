@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"os/exec"
-	"github.com/streadway/amqp"
+	"github.com/isayme/go-amqp-reconnect/rabbitmq"
 	"fmt"
 )
 
@@ -14,7 +14,7 @@ func main() {
 }
 
 func ReceiveMessage(connString string) {
-	conn, err := amqp.Dial("amqp://"+connString)
+	conn, err := rabbitmq.Dial("amqp://"+connString)
 	if err != nil {
         panic("could not establish connection with RabbitMQ:" + err.Error())
 	}
@@ -27,7 +27,7 @@ func ReceiveMessage(connString string) {
 	defer channel.Close()
 
 	_, err = channel.QueueDeclare(
-		"test", // queue name
+		"restart", // queue name
 		true, // durable
 		false, // delete when unused
 		false, // exclusive
@@ -40,7 +40,7 @@ func ReceiveMessage(connString string) {
 	}
 
 	err = channel.QueueBind(
-		"test", // queue name
+		"restart", // queue name
 		"service_events", // routing key
 		"events", // exchange name
 		false,
@@ -52,8 +52,8 @@ func ReceiveMessage(connString string) {
 	}
 	// We consume data from the queue named Test using the channel we created in go.
 	msgs, err := channel.Consume(
-		"test", // queue name
-		"", // consumer
+		"restart", // queue name
+		"service_restart", // consumer
 		false, // auto-ack
 		false, // exclusive
 		false, // no-local
@@ -70,15 +70,16 @@ func ReceiveMessage(connString string) {
 	go func() {
 		for m := range msgs {
 			msg := string(m.Body)
-			command := exec.Command("docker", "service", "update", msg)
+			fmt.Println("Restarting "+ msg)
+			command := exec.Command("docker", "service", "update", "--force", msg)
 			err = command.Run()
 			if err != nil {
-				fmt.Sprintf("cmd.Run() failed with %s\n", err)
+				fmt.Println("cmd.Run() failed with "+ err.Error())
 			}
 			fmt.Println("restarted")
 			m.Ack(false)
 		}
 	}()
-	fmt.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+	fmt.Println(" [*] Waiting for messages. To exit press CTRL+C")
 	<-forever
 }
