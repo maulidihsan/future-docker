@@ -19,16 +19,12 @@ RUN yum install -y  php-fpm \
                     php-pdo \
                     php-soap \
                     php-pecl-redis \
-                    php-pecl-imagick \
-                    sendmail
+                    php-pecl-imagick
 
 RUN useradd -M -s /bin/false -u 1000 www-data
 
 RUN mkdir -p /run/php-fpm && \
     chown www-data:www-data /run/php-fpm
-
-RUN mkdir -p /var/lib/php/session && \
-    chown www-data:www-data /var/lib/php/session
 
 COPY php-fpm.conf /etc/php-fpm.conf
 COPY php.ini /etc/php.ini

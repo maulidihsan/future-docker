@@ -5,7 +5,7 @@ RUN yum update -y && \
 
 RUN yum install -y nginx
 
-ADD nginx.conf /etc/nginx/nginx.conf
+COPY nginx.conf /etc/nginx/nginx.conf
 RUN yum clean all
 
 CMD ["nginx"]
